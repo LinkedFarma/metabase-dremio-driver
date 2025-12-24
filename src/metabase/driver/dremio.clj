@@ -17,7 +17,6 @@
             [metabase.driver.sql-jdbc.sync.interface :as sync.i]
             [metabase.driver.sql.query-processor :as sql.qp]
             [metabase.legacy-mbql.util :as mbql.u]
-;;;            [metabase.public-settings :as pubset]
             [metabase.query-processor.store :as qp.store]
             [metabase.query-processor.util :as qputil]
             [metabase.util.honey-sql-2 :as h2x]
@@ -64,13 +63,29 @@
 ;;; |                                         Descoberta de Metadados                                               |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-;; [cite_start]AJUSTE PONTUAL: Adicionadas aspas duplas em \"INFORMATION_SCHEMA\".\"TABLES\" para corrigir o erro de parse [cite: 89, 92]
+;; AJUSTE v1.0.4: Suporte a curingas (*) e listas separadas por vírgula no campo "Schema" do Metabase.
+;; Corrige a performance do Sync (evita varrer todos os schemas) e mantém o fix de visibilidade.
 (defmethod driver/describe-database :dremio
   [driver database]
-  {:tables
-   (set
-    (jdbc/query (sql-jdbc.conn/connection-details->spec driver (:details database))
-                ["SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" FROM \"INFORMATION_SCHEMA\".\"TABLES\" WHERE TABLE_SCHEMA NOT IN ('sys', 'information_schema')"]))})
+  (let [details (:details database)
+        schema-filter (or (:schema details) "")
+        ;; Transforma "bronze.*, silver.b_gruppy" em ["bronze.%" "silver.b_gruppy"]
+        patterns (if (str/blank? schema-filter)
+                   []
+                   (map #(str/replace (str/trim %) "*" "%") 
+                        (str/split schema-filter #",")))]
+    {:tables
+     (set
+      (jdbc/query (sql-jdbc.conn/connection-details->spec driver details)
+                  (if (empty? patterns)
+                    ;; Caso sem filtro: comportamento global (pode ser lento)
+                    ["SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" FROM \"INFORMATION_SCHEMA\".\"TABLES\" WHERE TABLE_SCHEMA NOT IN ('sys', 'information_schema')"]
+                    ;; Caso com filtro: gera query dinâmica com OR e LIKE
+                    (into [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
+                                "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
+                                "WHERE "
+                                (str/join " OR " (repeat (count patterns) "TABLE_SCHEMA LIKE ?")))]
+                          patterns))))}))
 
 (defmethod driver/describe-table :dremio
   [& args]
