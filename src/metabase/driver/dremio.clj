@@ -47,7 +47,6 @@
   (-> {:applicationName    config/mb-app-id-string
        :type :dremio
        :subprotocol "dremio"
-       ;; look_in_sources=true garante visibilidade das fontes externas no Dremio
        :subname (str "direct=" host ":" port (if-not (str/blank? schema) (str ";schema=" schema)) ";look_in_sources=true")
        :user user
        :password password
@@ -68,8 +67,7 @@
         conj (if (= type :exclude) " AND " " OR ")]
     (str "(" (str/join conj (repeat (count patterns) (str "TABLE_SCHEMA " op " ?"))) ")")))
 
-;; AJUSTE v1.0.5: Inteligência Híbrida. 
-;; Prioriza filtros da aba Sincronização (Somente/Excluir). Se vazios, usa o campo Schema da conexão.
+;; AJUSTE v1.0.7: Fallback "Chumbado" (Hardcoded) para bronze.b_gruppy.
 (defmethod driver/describe-database :dremio
   [driver database]
   (let [details (:details database)
@@ -78,22 +76,28 @@
         sync-values (or (:values sync-filters) [])
         conn-schema (or (:schema details) "")
         
-        raw-values (if (seq sync-values)
-                     sync-values
-                     (if-not (str/blank? conn-schema)
-                       (str/split conn-schema #",")
-                       []))
+        ;; Lógica de Prioridade com Fallback Forçado
+        raw-values (cond
+                     (seq sync-values) sync-values
+                     (not (str/blank? conn-schema)) (str/split conn-schema #",")
+                     :else ["bronze.b_gruppy"]) ;; <--- AQUI ESTÁ O CHUMBO
         
         patterns (distinct (map #(str/replace (str/trim %) "*" "%") raw-values))]
+
+    (log/info (str "Dremio Sync v1.0.7 Debug:"
+                   "\n  - UI Filters: " sync-values
+                   "\n  - Conn Schema: [" conn-schema "]"
+                   "\n  - Patterns Resolvidos: " patterns))
+
     {:tables
      (set
       (jdbc/query (sql-jdbc.conn/connection-details->spec driver details)
-                  (if (empty? patterns)
-                    ["SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" FROM \"INFORMATION_SCHEMA\".\"TABLES\" WHERE TABLE_SCHEMA NOT IN ('sys', 'information_schema')"]
-                    (into [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
-                                "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
-                                "WHERE " (build-schema-where-clause patterns filter-type))]
-                          patterns))))}))
+                  (let [sql-and-params (into [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
+                                                  "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
+                                                  "WHERE " (build-schema-where-clause patterns filter-type))]
+                                             patterns)]
+                    (log/info (str "Dremio Sync SQL Executado: " sql-and-params))
+                    sql-and-params)))}))
 
 (defmethod driver/describe-table :dremio
   [& args]
@@ -121,12 +125,10 @@
   [_ hsql-form amount unit]
   [:timestampadd [:raw (name unit)] amount (h2x/->timestamp hsql-form)])
 
-;; RESTAURADO: Suporte para data e hora atual no Dremio
 (defmethod sql.qp/current-datetime-honeysql-form :dremio
   [_driver]
   (h2x/with-database-type-info [:current_timestamp] "timestamp"))
 
-;; RESTAURADO: Helper para truncamento de datas
 (defn- date-trunc [unit expr] (sql/call :date_trunc (h2x/literal unit) (h2x/->timestamp expr)))
 
 (defmethod sql.qp/date [:dremio :week]
