@@ -47,7 +47,7 @@
   (-> {:applicationName    config/mb-app-id-string
        :type :dremio
        :subprotocol "dremio"
-       ;; AJUSTE PONTUAL: Adicionado ;look_in_sources=true para ignorar o bug de visibilidade dos Spaces
+       ;; look_in_sources=true garante visibilidade das fontes externas no Dremio
        :subname (str "direct=" host ":" port (if-not (str/blank? schema) (str ";schema=" schema)) ";look_in_sources=true")
        :user user
        :password password
@@ -63,28 +63,39 @@
 ;;; |                                         Descoberta de Metadados                                               |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-;; AJUSTE v1.0.4: Suporte a curingas (*) e listas separadas por vírgula no campo "Schema" do Metabase.
-;; Corrige a performance do Sync (evita varrer todos os schemas) e mantém o fix de visibilidade.
+(defn- build-schema-where-clause [patterns type]
+  (let [op (if (= type :exclude) "NOT LIKE" "LIKE")
+        conj (if (= type :exclude) " AND " " OR ")]
+    (str "(" (str/join conj (repeat (count patterns) (str "TABLE_SCHEMA " op " ?"))) ")")))
+
+;; AJUSTE v1.0.5: Integração com Filtros Nativos do Metabase (Incluir/Excluir) e Campo Schema.
 (defmethod driver/describe-database :dremio
   [driver database]
   (let [details (:details database)
-        schema-filter (or (:schema details) "")
-        ;; Transforma "bronze.*, silver.b_gruppy" em ["bronze.%" "silver.b_gruppy"]
-        patterns (if (str/blank? schema-filter)
+        ;; 1. Tenta pegar filtros da caixa de texto separada por vírgula (campo Schema da conexão)
+        conn-schema (or (:schema details) "")
+        ;; 2. Tenta pegar filtros nativos do Metabase (caixa de Incluir/Excluir do Sync)
+        sync-filters (get-in database [:metadata-sync-filters :schemas])
+        filter-type (or (:type sync-filters) :include)
+        filter-values (or (:values sync-filters) [])
+        
+        ;; Consolida os padrões: Converte "*" em "%" para o SQL LIKE
+        patterns (if (and (str/blank? conn-schema) (empty? filter-values))
                    []
-                   (map #(str/replace (str/trim %) "*" "%") 
-                        (str/split schema-filter #",")))]
+                   (distinct (map #(str/replace (str/trim %) "*" "%") 
+                                  (if-not (str/blank? conn-schema) 
+                                    (str/split conn-schema #",") 
+                                    filter-values))))]
     {:tables
      (set
       (jdbc/query (sql-jdbc.conn/connection-details->spec driver details)
                   (if (empty? patterns)
-                    ;; Caso sem filtro: comportamento global (pode ser lento)
+                    ;; Caso padrão: Busca tudo (exceto sistemas internos)
                     ["SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" FROM \"INFORMATION_SCHEMA\".\"TABLES\" WHERE TABLE_SCHEMA NOT IN ('sys', 'information_schema')"]
-                    ;; Caso com filtro: gera query dinâmica com OR e LIKE
+                    ;; Caso filtrado: Aplica os padrões dinamicamente
                     (into [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
                                 "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
-                                "WHERE "
-                                (str/join " OR " (repeat (count patterns) "TABLE_SCHEMA LIKE ?")))]
+                                "WHERE " (build-schema-where-clause patterns filter-type))]
                           patterns))))}))
 
 (defmethod driver/describe-table :dremio
