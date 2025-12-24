@@ -64,13 +64,13 @@
 ;;; |                                         Descoberta de Metadados                                               |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-;; AJUSTE PONTUAL: Usa jdbc/query com a spec do driver para listar tabelas via SQL, contornando o bug do JDBC padrão
+;; [cite_start]AJUSTE PONTUAL: Adicionadas aspas duplas em \"INFORMATION_SCHEMA\".\"TABLES\" para corrigir o erro de parse [cite: 89, 92]
 (defmethod driver/describe-database :dremio
   [driver database]
   {:tables
    (set
     (jdbc/query (sql-jdbc.conn/connection-details->spec driver (:details database))
-                ["SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA NOT IN ('sys', 'information_schema')"]))})
+                ["SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" FROM \"INFORMATION_SCHEMA\".\"TABLES\" WHERE TABLE_SCHEMA NOT IN ('sys', 'information_schema')"]))})
 
 (defmethod driver/describe-table :dremio
   [& args]
