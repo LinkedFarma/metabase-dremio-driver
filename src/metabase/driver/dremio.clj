@@ -68,31 +68,28 @@
         conj (if (= type :exclude) " AND " " OR ")]
     (str "(" (str/join conj (repeat (count patterns) (str "TABLE_SCHEMA " op " ?"))) ")")))
 
-;; AJUSTE v1.0.5: Integração com Filtros Nativos do Metabase (Incluir/Excluir) e Campo Schema.
+;; AJUSTE v1.0.5: Inteligência Híbrida. 
+;; Prioriza filtros da aba Sincronização (Somente/Excluir). Se vazios, usa o campo Schema da conexão.
 (defmethod driver/describe-database :dremio
   [driver database]
   (let [details (:details database)
-        ;; 1. Tenta pegar filtros da caixa de texto separada por vírgula (campo Schema da conexão)
-        conn-schema (or (:schema details) "")
-        ;; 2. Tenta pegar filtros nativos do Metabase (caixa de Incluir/Excluir do Sync)
         sync-filters (get-in database [:metadata-sync-filters :schemas])
         filter-type (or (:type sync-filters) :include)
-        filter-values (or (:values sync-filters) [])
+        sync-values (or (:values sync-filters) [])
+        conn-schema (or (:schema details) "")
         
-        ;; Consolida os padrões: Converte "*" em "%" para o SQL LIKE
-        patterns (if (and (str/blank? conn-schema) (empty? filter-values))
-                   []
-                   (distinct (map #(str/replace (str/trim %) "*" "%") 
-                                  (if-not (str/blank? conn-schema) 
-                                    (str/split conn-schema #",") 
-                                    filter-values))))]
+        raw-values (if (seq sync-values)
+                     sync-values
+                     (if-not (str/blank? conn-schema)
+                       (str/split conn-schema #",")
+                       []))
+        
+        patterns (distinct (map #(str/replace (str/trim %) "*" "%") raw-values))]
     {:tables
      (set
       (jdbc/query (sql-jdbc.conn/connection-details->spec driver details)
                   (if (empty? patterns)
-                    ;; Caso padrão: Busca tudo (exceto sistemas internos)
                     ["SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" FROM \"INFORMATION_SCHEMA\".\"TABLES\" WHERE TABLE_SCHEMA NOT IN ('sys', 'information_schema')"]
-                    ;; Caso filtrado: Aplica os padrões dinamicamente
                     (into [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
                                 "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
                                 "WHERE " (build-schema-where-clause patterns filter-type))]
@@ -124,10 +121,12 @@
   [_ hsql-form amount unit]
   [:timestampadd [:raw (name unit)] amount (h2x/->timestamp hsql-form)])
 
+;; RESTAURADO: Suporte para data e hora atual no Dremio
 (defmethod sql.qp/current-datetime-honeysql-form :dremio
   [_driver]
   (h2x/with-database-type-info [:current_timestamp] "timestamp"))
 
+;; RESTAURADO: Helper para truncamento de datas
 (defn- date-trunc [unit expr] (sql/call :date_trunc (h2x/literal unit) (h2x/->timestamp expr)))
 
 (defmethod sql.qp/date [:dremio :week]
