@@ -62,12 +62,14 @@
 ;;; |                                         Descoberta de Metadados                                               |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
-(defn- build-schema-where-clause [patterns type]
+;; AJUSTE v1.0.8: Inlining de parâmetros para evitar erro "Not all parameters are set" do Dremio.
+(defn- build-schema-where-clause-inlined [patterns type]
   (let [op (if (= type :exclude) "NOT LIKE" "LIKE")
         conj (if (= type :exclude) " AND " " OR ")]
-    (str "(" (str/join conj (repeat (count patterns) (str "TABLE_SCHEMA " op " ?"))) ")")))
+    (str "(" 
+         (str/join conj (map #(str "TABLE_SCHEMA " op " '" % "'") patterns)) 
+         ")")))
 
-;; AJUSTE v1.0.7: Fallback "Chumbado" (Hardcoded) para bronze.b_gruppy.
 (defmethod driver/describe-database :dremio
   [driver database]
   (let [details (:details database)
@@ -76,28 +78,24 @@
         sync-values (or (:values sync-filters) [])
         conn-schema (or (:schema details) "")
         
-        ;; Lógica de Prioridade com Fallback Forçado
+        ;; Prioridade de filtros com fallback chumbado
         raw-values (cond
                      (seq sync-values) sync-values
                      (not (str/blank? conn-schema)) (str/split conn-schema #",")
-                     :else ["bronze.b_gruppy"]) ;; <--- AQUI ESTÁ O CHUMBO
+                     :else ["bronze.b_gruppy"])
         
         patterns (distinct (map #(str/replace (str/trim %) "*" "%") raw-values))]
 
-    (log/info (str "Dremio Sync v1.0.7 Debug:"
-                   "\n  - UI Filters: " sync-values
-                   "\n  - Conn Schema: [" conn-schema "]"
-                   "\n  - Patterns Resolvidos: " patterns))
+    (log/info (str "Dremio Sync v1.0.8 Debug:"
+                   "\n  - Padrões Ativos: " patterns))
 
     {:tables
      (set
       (jdbc/query (sql-jdbc.conn/connection-details->spec driver details)
-                  (let [sql-and-params (into [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
-                                                  "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
-                                                  "WHERE " (build-schema-where-clause patterns filter-type))]
-                                             patterns)]
-                    (log/info (str "Dremio Sync SQL Executado: " sql-and-params))
-                    sql-and-params)))}))
+                  ;; Query sem o símbolo "?" para evitar bug do driver JDBC
+                  [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
+                        "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
+                        "WHERE " (build-schema-where-clause-inlined patterns filter-type))]))}))
 
 (defmethod driver/describe-table :dremio
   [& args]
@@ -160,8 +158,7 @@
   [driver t]
   (sql.qp/inline-value driver (t/offset-date-time t)))
 
-(defmethod driver/db-default-timezone :dremio [_ _]
-           "UTC")
+(defmethod driver/db-default-timezone :dremio [_ _] "UTC")
 
 (prefer-method
   sql-jdbc.execute/read-column-thunk
