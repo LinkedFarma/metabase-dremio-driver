@@ -36,9 +36,9 @@
 
 (defmethod driver/display-name :dremio [_] "Dremio")
 
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                         Configuração da Conexão                                               |
-;;; +----------------------------------------------------------------------------------------------------------------+
+;;; +------------------------------------------------------------------------------------------------+
+;;; |                                   Configuração da Conexão                                      |
+;;; +------------------------------------------------------------------------------------------------+
 
 (defmethod sql-jdbc.conn/connection-details->spec :dremio
   [_ {:keys [user password schema host port ssl]
@@ -47,7 +47,8 @@
   (-> {:applicationName    config/mb-app-id-string
        :type :dremio
        :subprotocol "dremio"
-       :subname (str "direct=" host ":" port (if-not (str/blank? schema) (str ";schema=" schema)) ";look_in_sources=true")
+       ;; AJUSTE: Removemos a trava de schema único no subname para permitir cross-query entre b_gruppy e b_gmc
+       :subname (str "direct=" host ":" port ";look_in_sources=true")
        :user user
        :password password
        :host host
@@ -58,11 +59,10 @@
        :sendTimeAsDatetime false}
       (sql-jdbc.common/handle-additional-options details, :seperator-style :semicolon)))
 
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                         Descoberta de Metadados                                               |
-;;; +----------------------------------------------------------------------------------------------------------------+
+;;; +------------------------------------------------------------------------------------------------+
+;;; |                                   Descoberta de Metadados                                      |
+;;; +------------------------------------------------------------------------------------------------+
 
-;; AJUSTE v1.0.8: Inlining de parâmetros para evitar erro "Not all parameters are set" do Dremio.
 (defn- build-schema-where-clause-inlined [patterns type]
   (let [op (if (= type :exclude) "NOT LIKE" "LIKE")
         conj (if (= type :exclude) " AND " " OR ")]
@@ -70,6 +70,7 @@
          (str/join conj (map #(str "TABLE_SCHEMA " op " '" % "'") patterns)) 
          ")")))
 
+;; AJUSTE v1.0.9: Chumbo duplo (b_gruppy + b_gmc) e correção na captura de filtros.
 (defmethod driver/describe-database :dremio
   [driver database]
   (let [details (:details database)
@@ -78,21 +79,20 @@
         sync-values (or (:values sync-filters) [])
         conn-schema (or (:schema details) "")
         
-        ;; Prioridade de filtros com fallback chumbado
+        ;; Lógica de Prioridade Robusta
         raw-values (cond
                      (seq sync-values) sync-values
                      (not (str/blank? conn-schema)) (str/split conn-schema #",")
-                     :else ["bronze.b_gruppy"])
+                     :else ["bronze.b_gruppy" "bronze.b_gmc"]) ;; CHUMBO DUPLO ATIVADO
         
         patterns (distinct (map #(str/replace (str/trim %) "*" "%") raw-values))]
 
-    (log/info (str "Dremio Sync v1.0.8 Debug:"
+    (log/info (str "Dremio Sync v1.0.9 Debug:"
                    "\n  - Padrões Ativos: " patterns))
 
     {:tables
      (set
       (jdbc/query (sql-jdbc.conn/connection-details->spec driver details)
-                  ;; Query sem o símbolo "?" para evitar bug do driver JDBC
                   [(str "SELECT TABLE_SCHEMA AS \"schema\", TABLE_NAME AS \"name\" "
                         "FROM \"INFORMATION_SCHEMA\".\"TABLES\" "
                         "WHERE " (build-schema-where-clause-inlined patterns filter-type))]))}))
@@ -101,9 +101,9 @@
   [& args]
   (apply (get-method driver/describe-table :sql-jdbc) args))
 
-;;; +----------------------------------------------------------------------------------------------------------------+
-;;; |                                         Restante das Implementações                                            |
-;;; +----------------------------------------------------------------------------------------------------------------+
+;;; +------------------------------------------------------------------------------------------------+
+;;; |                                   Restante das Implementações                                  |
+;;; +------------------------------------------------------------------------------------------------+
 
 (defmethod driver/dynamic-database-types-lookup :dremio
   [driver database database-types]
